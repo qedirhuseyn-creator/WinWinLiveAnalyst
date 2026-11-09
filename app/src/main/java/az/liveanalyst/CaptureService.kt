@@ -265,41 +265,62 @@ class CaptureService : Service() {
         var bitmap: Bitmap? = null
 
         try {
-            bitmap = imageToBitmap(image)
+            // Bitmap yaradılır və ayrıca sabit dəyişəndə saxlanılır.
+            val capturedBitmap = imageToBitmap(image)
+            bitmap = capturedBitmap
 
-            val input = InputImage.fromBitmap(bitmap, 0)
+            // OCR artıq null olmayan Bitmap alır.
+            val input = InputImage.fromBitmap(capturedBitmap, 0)
 
-            recognizer?.process(input)
-                ?.addOnSuccessListener { result ->
+            val task = recognizer?.process(input)
 
-                    if (stopped) return@addOnSuccessListener
-
-                    // Koordinatları qoruyan yeni OCR parser
-                    val snapshot = MarketParser.parse(result)
-
-                    overlayText?.text =
-                        MarketAdvisor.render(snapshot)
+            if (task == null) {
+                if (!capturedBitmap.isRecycled) {
+                    capturedBitmap.recycle()
                 }
-                ?.addOnFailureListener {
-                    showStatus(
-                        "Mətn tanınmadı. Ekran yenidən yoxlanılır."
-                    )
+                bitmap = null
+                processing = false
+                return
+            }
+
+            task.addOnSuccessListener { result ->
+
+                if (stopped) return@addOnSuccessListener
+
+                // Koordinatları qoruyan OCR parser
+                val snapshot = MarketParser.parse(result)
+
+                overlayText?.text =
+                    MarketAdvisor.render(snapshot)
+            }
+
+            task.addOnFailureListener {
+                showStatus(
+                    "Mətn tanınmadı. Ekran yenidən yoxlanılır."
+                )
+            }
+
+            task.addOnCompleteListener {
+                if (!capturedBitmap.isRecycled) {
+                    capturedBitmap.recycle()
                 }
-                ?.addOnCompleteListener {
-                    bitmap?.recycle()
-                    bitmap = null
-                    processing = false
-                }
-                ?: run {
-                    bitmap?.recycle()
-                    bitmap = null
-                    processing = false
-                }
+
+                bitmap = null
+                processing = false
+            }
 
         } catch (e: Exception) {
-            bitmap?.recycle()
+            bitmap?.let {
+                if (!it.isRecycled) {
+                    it.recycle()
+                }
+            }
+
+            bitmap = null
             processing = false
+
             showStatus("OCR xətası: ${e.message}")
+
         } finally {
             image.close()
         }
