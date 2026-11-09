@@ -23,6 +23,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
@@ -48,17 +49,23 @@ class CaptureService : Service() {
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var reader: ImageReader? = null
+    private var recognizer: TextRecognizer? = null
 
+    private var windowManager: WindowManager? = null
     private var overlay: LinearLayout? = null
     private var overlayText: TextView? = null
-
-    private var recognizer: TextRecognizer? = null
+    private var overlayScroll: ScrollView? = null
+    private var overlayParams: WindowManager.LayoutParams? = null
 
     private val handler = Handler(Looper.getMainLooper())
 
     private var processing = false
     private var lastProcessedAt = 0L
     private var stopped = false
+    private var collapsed = false
+
+    private var panelWidth = 300
+    private var panelHeight = 260
 
     private var projectionCallback: MediaProjection.Callback? = null
 
@@ -74,7 +81,7 @@ class CaptureService : Service() {
 
         val notification = Notification.Builder(this, CHANNEL)
             .setContentTitle("WinWinLiveAnalyst aktivdir")
-            .setContentText("Ekran OCR monitorinqi davam edir")
+            .setContentText("Canlı ekran monitorinqi davam edir")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .build()
@@ -106,11 +113,15 @@ class CaptureService : Service() {
         try {
             startMonitoring(resultCode, resultData)
         } catch (e: Exception) {
-            showStatus("Monitorinq başlatmaq mümkün olmadı: ${e.message}")
+            showStatus("Başlatma xətası: ${e.message}")
             stopSelf()
         }
 
         return START_NOT_STICKY
+    }
+
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density).toInt()
     }
 
     private fun createNotificationChannel() {
@@ -160,57 +171,173 @@ class CaptureService : Service() {
 
     private fun showOverlay() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        windowManager = wm
 
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(18, 16, 18, 16)
+            setPadding(dp(7), dp(5), dp(7), dp(7))
             setBackgroundColor(0xEE14212B.toInt())
         }
 
-        val header = TextView(this).apply {
-            text = "LIVE ANALYST • AĞILLI MONİTORİNQ"
-            textSize = 14f
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val title = TextView(this).apply {
+            text = "LIVE ANALYST"
+            textSize = 13f
             setTextColor(0xFF9BD51B.toInt())
+            setPadding(dp(5), dp(10), dp(5), dp(10))
+        }
+
+        val smallButton = makeButton("−") {
+            panelWidth = (panelWidth - 30).coerceAtLeast(190)
+            panelHeight = (panelHeight - 35).coerceAtLeast(120)
+            updateOverlaySize()
+        }
+
+        val bigButton = makeButton("+") {
+            panelWidth = (panelWidth + 30).coerceAtMost(420)
+            panelHeight = (panelHeight + 35).coerceAtMost(500)
+            updateOverlaySize()
+        }
+
+        val collapseButton = makeButton("▼") {
+            collapsed = !collapsed
+            overlayScroll?.visibility =
+                if (collapsed) LinearLayout.GONE else LinearLayout.VISIBLE
+            it.text = if (collapsed) "▲" else "▼"
+        }
+
+        val closeButton = makeButton("×") {
+            stopSelf()
+        }
+
+        header.addView(
+            title,
+            LinearLayout.LayoutParams(0, dp(42), 1f)
+        )
+        header.addView(smallButton)
+        header.addView(bigButton)
+        header.addView(collapseButton)
+        header.addView(closeButton)
+
+        // Panel yalnız başlıqdan tutularaq sürüşdürülür.
+        title.setOnTouchListener { _, event ->
+            val params = overlayParams
+
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    title.setTag(R.id.content, event.rawX)
+                    title.setTag(R.id.contentDescription, event.rawY)
+                    true
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    if (params != null) {
+                        val oldX = title.getTag(R.id.content) as? Float
+                            ?: event.rawX
+                        val oldY = title.getTag(R.id.contentDescription) as? Float
+                            ?: event.rawY
+
+                        params.x += (event.rawX - oldX).toInt()
+                        params.y += (event.rawY - oldY).toInt()
+
+                        title.setTag(R.id.content, event.rawX)
+                        title.setTag(R.id.contentDescription, event.rawY)
+
+                        try {
+                            wm.updateViewLayout(panel, params)
+                        } catch (_: Exception) {
+                        }
+                    }
+                    true
+                }
+
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> {
+                    title.setTag(R.id.content, null)
+                    title.setTag(R.id.contentDescription, null)
+                    true
+                }
+
+                else -> false
+            }
         }
 
         val body = TextView(this).apply {
             text = "Ekran məlumatları gözlənilir..."
-            textSize = 14f
+            textSize = 13f
             setTextColor(0xFFFFFFFF.toInt())
-            setPadding(0, 12, 0, 12)
+            setPadding(dp(7), dp(8), dp(7), dp(8))
         }
 
         val scroll = ScrollView(this).apply {
             addView(body)
         }
 
-        val stopButton = Button(this).apply {
-            text = "Monitorinqi dayandır"
-            setOnClickListener {
-                stopSelf()
-            }
-        }
+        overlayText = body
+        overlayScroll = scroll
 
         panel.addView(header)
-        panel.addView(scroll)
-        panel.addView(stopButton)
+        panel.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(panelHeight)
+            )
+        )
 
         val params = WindowManager.LayoutParams(
-            (resources.displayMetrics.widthPixels * 0.88f).toInt(),
+            dp(panelWidth),
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = 100
+            gravity = Gravity.TOP or Gravity.START
+            x = dp(12)
+            y = dp(75)
         }
 
-        wm.addView(panel, params)
-
+        overlayParams = params
         overlay = panel
-        overlayText = body
+
+        wm.addView(panel, params)
+    }
+
+    private fun makeButton(
+        label: String,
+        action: (TextView) -> Unit
+    ): TextView {
+        return TextView(this).apply {
+            text = label
+            textSize = 17f
+            gravity = Gravity.CENTER
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding(dp(7), dp(7), dp(7), dp(7))
+            setOnClickListener {
+                action(this)
+            }
+        }
+    }
+
+    private fun updateOverlaySize() {
+        val params = overlayParams ?: return
+        val panel = overlay ?: return
+
+        params.width = dp(panelWidth)
+
+        overlayScroll?.layoutParams = overlayScroll?.layoutParams?.apply {
+            height = dp(panelHeight)
+        }
+
+        try {
+            windowManager?.updateViewLayout(panel, params)
+        } catch (_: Exception) {
+        }
     }
 
     private fun startCapture() {
@@ -262,65 +389,45 @@ class CaptureService : Service() {
         processing = true
         lastProcessedAt = SystemClock.elapsedRealtime()
 
-        var bitmap: Bitmap? = null
+        var capturedBitmap: Bitmap? = null
 
         try {
-            // Bitmap yaradılır və ayrıca sabit dəyişəndə saxlanılır.
-            val capturedBitmap = imageToBitmap(image)
-            bitmap = capturedBitmap
+            val bitmap = imageToBitmap(image)
+            capturedBitmap = bitmap
 
-            // OCR artıq null olmayan Bitmap alır.
-            val input = InputImage.fromBitmap(capturedBitmap, 0)
+            val input = InputImage.fromBitmap(bitmap, 0)
+            val activeRecognizer = recognizer
 
-            val task = recognizer?.process(input)
-
-            if (task == null) {
-                if (!capturedBitmap.isRecycled) {
-                    capturedBitmap.recycle()
-                }
-                bitmap = null
+            if (activeRecognizer == null) {
+                bitmap.recycle()
                 processing = false
                 return
             }
 
-            task.addOnSuccessListener { result ->
+            activeRecognizer.process(input)
+                .addOnSuccessListener { result ->
+                    if (stopped) return@addOnSuccessListener
 
-                if (stopped) return@addOnSuccessListener
-
-                // Koordinatları qoruyan OCR parser
-                val snapshot = MarketParser.parse(result)
-
-                overlayText?.text =
-                    MarketAdvisor.render(snapshot)
-            }
-
-            task.addOnFailureListener {
-                showStatus(
-                    "Mətn tanınmadı. Ekran yenidən yoxlanılır."
-                )
-            }
-
-            task.addOnCompleteListener {
-                if (!capturedBitmap.isRecycled) {
-                    capturedBitmap.recycle()
+                    val snapshot = MarketParser.parse(result)
+                    overlayText?.text = MarketAdvisor.render(snapshot)
                 }
-
-                bitmap = null
-                processing = false
-            }
+                .addOnFailureListener {
+                    showStatus("Mətn tanınmadı. Yenidən yoxlanılır.")
+                }
+                .addOnCompleteListener {
+                    if (!bitmap.isRecycled) {
+                        bitmap.recycle()
+                    }
+                    capturedBitmap = null
+                    processing = false
+                }
 
         } catch (e: Exception) {
-            bitmap?.let {
-                if (!it.isRecycled) {
-                    it.recycle()
-                }
+            capturedBitmap?.let {
+                if (!it.isRecycled) it.recycle()
             }
-
-            bitmap = null
             processing = false
-
             showStatus("OCR xətası: ${e.message}")
-
         } finally {
             image.close()
         }
@@ -328,8 +435,8 @@ class CaptureService : Service() {
 
     private fun imageToBitmap(image: Image): Bitmap {
         val plane = image.planes[0]
-
         val buffer: ByteBuffer = plane.buffer
+
         val pixelStride = plane.pixelStride
         val rowStride = plane.rowStride
 
@@ -337,9 +444,7 @@ class CaptureService : Service() {
         val height = image.height
 
         val rowPadding = rowStride - pixelStride * width
-
-        val paddedWidth =
-            width + rowPadding / pixelStride
+        val paddedWidth = width + rowPadding / pixelStride
 
         val paddedBitmap = Bitmap.createBitmap(
             paddedWidth,
@@ -400,14 +505,16 @@ class CaptureService : Service() {
 
         try {
             overlay?.let {
-                (getSystemService(WINDOW_SERVICE) as WindowManager)
-                    .removeView(it)
+                windowManager?.removeView(it)
             }
         } catch (_: Exception) {
         }
 
         overlay = null
         overlayText = null
+        overlayScroll = null
+        overlayParams = null
+        windowManager = null
 
         handler.removeCallbacksAndMessages(null)
 
