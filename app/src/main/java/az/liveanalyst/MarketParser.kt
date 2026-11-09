@@ -23,56 +23,33 @@ object MarketParser {
 
     private data class OcrLine(
         val text: String,
-        val bounds: Rect
+        val top: Int
     )
 
     private val oddsRegex =
         Regex("""(?<![\d.,])(\d{1,3}[.,]\d{2,3})(?!\d)""")
 
     private val scoreRegex =
-        Regex("""(?<!\d)(\d{1,2})\s*[-–]\s*(\d{1,2})(?!\d)""")
+        Regex("""(?<![\d:])(\d{1,2})\s*[-–]\s*(\d{1,2})(?![\d:])""")
 
     private val minuteRegex =
         Regex("""(?<!\d)(\d{1,3})\s*[:.]\s*(\d{2})(?!\d)|(?<!\d)(\d{1,3})\s*['’′]""")
 
-    private val categories = linkedMapOf(
-        "TAYM/MATÇ" to listOf(
-            "taym/matç", "ht/ft", "half time/full time",
-            "hissə/matç", "hissə/matç nəticəsi"
-        ),
-        "1X2" to listOf(
-            "1x2", "oyun nəticəsi", "match result",
-            "matç nəticəsi"
-        ),
-        "İKİLİ ŞANS" to listOf(
-            "ikili şans", "double chance"
-        ),
-        "QOL ÜST/ALT" to listOf(
-            "üst/alt", "over/under", "toplam qol",
-            "total goals", "toplam"
-        ),
-        "HƏR İKİ KOMANDA QOL VURAR" to listOf(
-            "hər iki komanda", "both teams", "btts"
-        ),
-        "HANDİKAP" to listOf(
-            "handikap", "handicap"
-        ),
-        "DƏQİQ HESAB" to listOf(
-            "dəqiq hesab", "correct score"
-        ),
-        "NÖVBƏTİ QOL" to listOf(
-            "növbəti qol", "next goal"
-        ),
-        "KÜNC ZƏRBƏLƏRİ" to listOf(
-            "künc", "corner"
-        ),
-        "VƏRƏQƏLƏR" to listOf(
-            "vərəq", "cards"
-        ),
-        "HİSSƏ NƏTİCƏSİ" to listOf(
-            "1-ci hissə", "2-ci hissə",
-            "birinci hissə", "ikinci hissə"
-        )
+    private val marketPatterns = listOf(
+        "taym/matç" to listOf("taym/matç", "ht/ft", "half time/full time"),
+        "1X2" to listOf("1x2", "matçın nəticəsi", "oyunun nəticəsi"),
+        "İkiqat şans" to listOf("ikiqat şans", "double chance", "1x", "x2", "12"),
+        "Üst/Alt" to listOf("üst/alt", "over/under", "total", "qol üst", "qol alt"),
+        "Hər iki komanda qol vuracaq" to listOf("hər iki komanda", "both teams to score", "btts"),
+        "Dəqiq hesab" to listOf("dəqiq hesab", "correct score"),
+        "Növbəti qol" to listOf("növbəti qol", "next goal"),
+        "Künc zərbələri" to listOf("künc", "corner", "corners"),
+        "Kartlar" to listOf("kart", "cards", "sarı kart", "qırmızı kart"),
+        "Handikap" to listOf("handikap", "handicap", "asian handicap"),
+        "İlk hissə" to listOf("ilk hissə", "1-ci hissə", "first half"),
+        "İkinci hissə" to listOf("ikinci hissə", "2-ci hissə", "second half"),
+        "Komanda qolları" to listOf("komanda qolları", "team total"),
+        "Qol sayı" to listOf("qol sayı", "goals")
     )
 
     fun parse(result: Text): ScreenSnapshot {
@@ -80,11 +57,10 @@ object MarketParser {
 
         result.textBlocks.forEach { block ->
             block.lines.forEach { line ->
-                val bounds = line.boundingBox ?: Rect(0, 0, 0, 0)
                 lines.add(
                     OcrLine(
-                        line.text.trim(),
-                        Rect(bounds)
+                        text = line.text.trim(),
+                        top = line.boundingBox?.top ?: 0
                     )
                 )
             }
@@ -94,175 +70,215 @@ object MarketParser {
     }
 
     fun parse(text: String): ScreenSnapshot {
-        val lines = text.lines()
-            .filter { it.isNotBlank() }
-            .mapIndexed { index, value ->
-                OcrLine(
-                    value.trim(),
-                    Rect(0, index * 50, 1000, index * 50 + 40)
-                )
-            }
+        val lines = text.lines().mapIndexed { index, line ->
+            OcrLine(line.trim(), index * 20)
+        }
 
         return parseLines(lines)
     }
 
-    private fun parseLines(lines: List<OcrLine>): ScreenSnapshot {
+    private fun parseLines(
+        lines: List<OcrLine>
+    ): ScreenSnapshot {
 
-        // Oyun vaxtını ayrıca tapırıq.
-        val minute = lines.firstNotNullOfOrNull { line ->
-            val match = minuteRegex.find(line.text) ?: return@firstNotNullOfOrNull null
+        val allText = lines.joinToString(" ") { it.text }
 
-            val minuteValue = match.groupValues[1]
-                .ifBlank { match.groupValues[3] }
+        val minute = findMinute(lines)
+        val score = findScore(lines, minute)
 
-            val secondValue = match.groupValues[2]
+        val markets = mutableListOf<ParsedMarket>()
 
-            val value = minuteValue.toIntOrNull()
-                ?: return@firstNotNullOfOrNull null
-
-            if (value in 0..150) {
-                if (secondValue.isNotBlank()) {
-                    "$minuteValue:$secondValue"
-                } else {
-                    "$minuteValue′"
-                }
-            } else null
-        }
-
-        // Hesab yalnız tire ilə ayrılmış və real futbol hesabı
-        // diapazonunda olan rəqəmlərdən seçilir.
-        val score = lines.firstNotNullOfOrNull { line ->
-            val match = scoreRegex.find(line.text)
-                ?: return@firstNotNullOfOrNull null
-
-            val home = match.groupValues[1].toIntOrNull()
-                ?: return@firstNotNullOfOrNull null
-
-            val away = match.groupValues[2].toIntOrNull()
-                ?: return@firstNotNullOfOrNull null
-
-            if (home in 0..15 && away in 0..15) {
-                "$home-$away"
-            } else {
-                null
-            }
-        }
-
-        val marketLines = lines.mapNotNull { line ->
-            val odds = oddsRegex.findAll(line.text)
+        lines.forEachIndexed { index, line ->
+            val values = oddsRegex.findAll(line.text)
                 .mapNotNull {
                     it.groupValues[1]
                         .replace(',', '.')
                         .toDoubleOrNull()
                 }
-                .filter {
-                    it.isFinite() && it > 1.0 && it < 1001.0
-                }
+                .filter { it in 1.01..1000.0 }
+                .distinct()
                 .toList()
 
-            if (odds.isEmpty()) null else line to odds
+            if (values.isEmpty()) return@forEachIndexed
+
+            val contextStart = (index - 2).coerceAtLeast(0)
+            val contextEnd = (index + 1).coerceAtMost(lines.lastIndex)
+
+            val context = lines
+                .subList(contextStart, contextEnd + 1)
+                .joinToString(" ") { it.text }
+
+            val category = detectCategory(context)
+            val selection = detectSelection(line.text, context)
+
+            markets.add(
+                ParsedMarket(
+                    category = category,
+                    odds = values,
+                    sourceLine = line.text,
+                    selection = selection,
+                    top = line.top
+                )
+            )
         }
 
-        val markets = marketLines.map { (oddsLine, odds) ->
-
-            val nearby = lines
-                .filter { candidate ->
-                    candidate !== oddsLine &&
-                        candidate.bounds.centerY() > 0 &&
-                        absDistance(
-                            candidate.bounds.centerY(),
-                            oddsLine.bounds.centerY()
-                        ) < 130
-                }
-                .sortedBy {
-                    absDistance(
-                        it.bounds.centerY(),
-                        oddsLine.bounds.centerY()
-                    )
-                }
-
-            val categoryLine = nearby.firstOrNull { candidate ->
-                findCategory(candidate.text) != null
-            }
-
-            val category = categoryLine?.let {
-                findCategory(it.text)
-            } ?: "TANINMAYAN BAZAR"
-
-            val selection = nearby.firstOrNull { candidate ->
-                candidate.bounds.centerY() <= oddsLine.bounds.centerY() &&
-                    candidate.text.length in 2..70 &&
-                    findCategory(candidate.text) == null &&
-                    oddsRegex.find(candidate.text) == null &&
-                    scoreRegex.find(candidate.text) == null
-            }?.text ?: "Seçim tanınmadı"
-
-            ParsedMarket(
-                category = category,
-                odds = odds,
-                sourceLine = oddsLine.text,
-                selection = selection,
-                top = oddsLine.bounds.top
-            )
+        // Eyni sətirin təkrar oxunmasının qarşısını alır.
+        val uniqueMarkets = markets.distinctBy {
+            "${it.category}|${it.sourceLine}|${it.odds}"
         }
 
         return ScreenSnapshot(
             score = score,
             minute = minute,
-            markets = markets
+            markets = uniqueMarkets
         )
     }
 
-    private fun findCategory(text: String): String? {
-        val normalized = text.lowercase(Locale.ROOT)
+    private fun findMinute(lines: List<OcrLine>): String? {
+        for (line in lines) {
+            val match = minuteRegex.find(line.text) ?: continue
 
-        return categories.entries.firstOrNull { entry ->
-            entry.value.any { term ->
-                normalized.contains(term)
+            val first = match.groupValues[1]
+            val second = match.groupValues[2]
+
+            if (first.isNotBlank() && second.isNotBlank()) {
+                val minute = first.toIntOrNull() ?: continue
+                val seconds = second.toIntOrNull() ?: continue
+
+                if (minute <= 150 && seconds <= 59) {
+                    return "$minute:$second"
+                }
+            } else {
+                val minute = match.groupValues[3].toIntOrNull()
+                    ?: continue
+
+                if (minute <= 150) return "$minute'"
             }
-        }?.key
+        }
+
+        return null
     }
 
-    private fun absDistance(a: Int, b: Int): Int {
-        return kotlin.math.abs(a - b)
+    private fun findScore(
+        lines: List<OcrLine>,
+        minute: String?
+    ): String? {
+
+        for (line in lines) {
+            val lower = line.text.lowercase(Locale.ROOT)
+
+            // Vaxt və statistik göstəriciləri hesab kimi qəbul etmə.
+            if (
+                lower.contains("dəqiqə") ||
+                lower.contains("minute") ||
+                lower.contains("time") ||
+                lower.contains("saniyə")
+            ) continue
+
+            if (minute != null &&
+                line.text.contains(minute.replace(":", "-"))
+            ) continue
+
+            val match = scoreRegex.find(line.text) ?: continue
+
+            val home = match.groupValues[1].toIntOrNull() ?: continue
+            val away = match.groupValues[2].toIntOrNull() ?: continue
+
+            if (home <= 20 && away <= 20) {
+                return "$home-$away"
+            }
+        }
+
+        return null
+    }
+
+    private fun detectCategory(context: String): String {
+        val normalized = context.lowercase(Locale.ROOT)
+
+        for ((category, patterns) in marketPatterns) {
+            if (patterns.any { normalized.contains(it) }) {
+                return category
+            }
+        }
+
+        return "Digər bazar"
+    }
+
+    private fun detectSelection(
+        line: String,
+        context: String
+    ): String {
+        val lower = context.lowercase(Locale.ROOT)
+
+        return when {
+            lower.contains("ev sahibi") ||
+                lower.contains("home") -> "Ev sahibi"
+
+            lower.contains("qonaq") ||
+                lower.contains("away") -> "Qonaq"
+
+            lower.contains("heç-heçə") ||
+                lower.contains("draw") -> "Heç-heçə"
+
+            lower.contains("bəli") ||
+                lower.contains("yes") -> "Bəli"
+
+            lower.contains("xeyr") ||
+                lower.contains("no") -> "Xeyr"
+
+            lower.contains("üst") ||
+                lower.contains("over") -> "Üst"
+
+            lower.contains("alt") ||
+                lower.contains("under") -> "Alt"
+
+            else -> line
+        }
     }
 }
 
 object MarketAdvisor {
 
     fun render(snapshot: ScreenSnapshot): String {
-        val out = StringBuilder()
+        val output = StringBuilder()
 
-        out.append("LIVE ANALYST • AĞILLI OCR\n")
-        out.append("Hesab: ${snapshot.score ?: "təsdiqlənmədi"}\n")
-        out.append("Dəqiqə: ${snapshot.minute ?: "təsdiqlənmədi"}\n")
-        out.append("Əmsal sətrləri: ${snapshot.markets.size}\n\n")
+        output.append("WINWIN LIVE ANALYST\n")
+        output.append("----------------------------\n")
 
-        if (snapshot.markets.isEmpty()) {
-            out.append("Əmsal aşkarlanmadı.\n")
-        } else {
-            snapshot.markets
-                .sortedBy { it.top }
-                .take(15)
-                .forEach { market ->
-
-                    val odds = market.odds.joinToString(" / ") {
-                        "%.2f".format(Locale.US, it)
-                    }
-
-                    out.append("${market.category}\n")
-                    out.append("Seçim: ${market.selection}\n")
-                    out.append("Əmsal: $odds\n")
-                    out.append("OCR: ${market.sourceLine}\n\n")
-                }
-        }
-
-        out.append("HESABLAMA STATUSU\n")
-        out.append(
-            "OCR nəticələri yoxlanılmalıdır. " +
-                "Bazarın bütün seçimləri təsdiqlənmədən arbitraj hesablanmır.\n"
+        output.append(
+            "Hesab: ${snapshot.score ?: "Tanınmadı"}\n"
         )
 
-        return out.toString()
+        output.append(
+            "Oyun vaxtı: ${snapshot.minute ?: "Tanınmadı"}\n"
+        )
+
+        output.append("----------------------------\n")
+
+        if (snapshot.markets.isEmpty()) {
+            output.append(
+                "Mərc bazarı hələ tanınmayıb.\n"
+            )
+        } else {
+            snapshot.markets.forEachIndexed { index, market ->
+                output.append("${index + 1}. ${market.category}\n")
+                output.append("Seçim: ${market.selection}\n")
+                output.append(
+                    "Əmsallar: ${market.odds.joinToString(" | ")}\n"
+                )
+                output.append("Mənbə: ${market.sourceLine}\n")
+                output.append("----------------------------\n")
+            }
+        }
+
+        output.append(
+            "Yadda saxlanılan səhifə: ${MarketSession.getPageCount()}\n"
+        )
+
+        output.append(
+            "Qeyd: OCR nəticələrini kuponla tutuşdurmadan mərc qərarı vermə."
+        )
+
+        return output.toString()
     }
 }
