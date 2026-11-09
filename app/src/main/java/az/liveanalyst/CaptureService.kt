@@ -13,6 +13,7 @@ import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -25,33 +26,40 @@ import android.view.Gravity
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.nio.ByteBuffer
 
 class CaptureService : Service() {
 
     companion object {
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
+
         private const val CHANNEL = "live_analyst_monitor"
         private const val NOTIFICATION_ID = 71
+        private const val CAPTURE_INTERVAL = 2500L
     }
 
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var reader: ImageReader? = null
+
     private var overlay: LinearLayout? = null
     private var overlayText: TextView? = null
 
+    private var recognizer: TextRecognizer? = null
+
     private val handler = Handler(Looper.getMainLooper())
-    private val recognizer by lazy {
-        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-    }
 
     private var processing = false
     private var lastProcessedAt = 0L
+    private var stopped = false
+
     private var projectionCallback: MediaProjection.Callback? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -62,16 +70,16 @@ class CaptureService : Service() {
         startId: Int
     ): Int {
 
-        createChannel()
+        createNotificationChannel()
 
         val notification = Notification.Builder(this, CHANNEL)
-            .setContentTitle("Live Analyst aktivdir")
-            .setContentText("Ekran sənin başladığın monitorinq zamanı təhlil edilir")
+            .setContentTitle("WinWinLiveAnalyst aktivdir")
+            .setContentText("Ekran OCR monitorinqi davam edir")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .build()
 
-        if (Build.VERSION.SDK_INT >= 29) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
                 notification,
@@ -81,41 +89,32 @@ class CaptureService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        val code = intent?.getIntExtra(
+        val resultCode = intent?.getIntExtra(
             EXTRA_RESULT_CODE,
             Activity.RESULT_CANCELED
         ) ?: Activity.RESULT_CANCELED
 
         @Suppress("DEPRECATION")
-        val data = intent?.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
+        val resultData =
+            intent?.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
 
-        if (code != Activity.RESULT_OK || data == null) {
+        if (resultCode != Activity.RESULT_OK || resultData == null) {
             stopSelf()
             return START_NOT_STICKY
         }
 
-        val manager = getSystemService(
-            Context.MEDIA_PROJECTION_SERVICE
-        ) as MediaProjectionManager
-
-        projection = manager.getMediaProjection(code, data)
-
-        projectionCallback = object : MediaProjection.Callback() {
-            override fun onStop() {
-                stopSelf()
-            }
+        try {
+            startMonitoring(resultCode, resultData)
+        } catch (e: Exception) {
+            showStatus("Monitorinq başlatmaq mümkün olmadı: ${e.message}")
+            stopSelf()
         }
-
-        projection?.registerCallback(projectionCallback!!, handler)
-
-        showOverlay()
-        startCapture()
 
         return START_NOT_STICKY
     }
 
-    private fun createChannel() {
-        if (Build.VERSION.SDK_INT >= 26) {
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL,
                 "Canlı monitorinq",
@@ -127,48 +126,85 @@ class CaptureService : Service() {
         }
     }
 
+    private fun startMonitoring(
+        resultCode: Int,
+        resultData: Intent
+    ) {
+        val manager = getSystemService(
+            Context.MEDIA_PROJECTION_SERVICE
+        ) as MediaProjectionManager
+
+        projection = manager.getMediaProjection(
+            resultCode,
+            resultData
+        )
+
+        projectionCallback = object : MediaProjection.Callback() {
+            override fun onStop() {
+                stopSelf()
+            }
+        }
+
+        projection?.registerCallback(
+            projectionCallback!!,
+            handler
+        )
+
+        recognizer = TextRecognition.getClient(
+            TextRecognizerOptions.DEFAULT_OPTIONS
+        )
+
+        showOverlay()
+        startCapture()
+    }
+
     private fun showOverlay() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
 
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(22, 18, 22, 18)
+            setPadding(18, 16, 18, 16)
             setBackgroundColor(0xEE14212B.toInt())
         }
 
         val header = TextView(this).apply {
-            text = "LIVE ANALYST • MONİTORİNQ"
-            textSize = 13f
+            text = "LIVE ANALYST • AĞILLI MONİTORİNQ"
+            textSize = 14f
             setTextColor(0xFF9BD51B.toInt())
         }
 
         val body = TextView(this).apply {
-            text = "Ekrandakı məlumatlar gözlənilir..."
-            textSize = 13f
+            text = "Ekran məlumatları gözlənilir..."
+            textSize = 14f
             setTextColor(0xFFFFFFFF.toInt())
-            setPadding(0, 10, 0, 10)
+            setPadding(0, 12, 0, 12)
         }
 
-        val stop = Button(this).apply {
+        val scroll = ScrollView(this).apply {
+            addView(body)
+        }
+
+        val stopButton = Button(this).apply {
             text = "Monitorinqi dayandır"
-            setOnClickListener { stopSelf() }
+            setOnClickListener {
+                stopSelf()
+            }
         }
 
         panel.addView(header)
-        panel.addView(body)
-        panel.addView(stop)
+        panel.addView(scroll)
+        panel.addView(stopButton)
 
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            (resources.displayMetrics.widthPixels * 0.88f).toInt(),
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            x = 12
-            y = 180
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            y = 100
         }
 
         wm.addView(panel, params)
@@ -179,6 +215,7 @@ class CaptureService : Service() {
 
     private fun startCapture() {
         val metrics = resources.displayMetrics
+
         val width = metrics.widthPixels
         val height = metrics.heightPixels
         val density = metrics.densityDpi
@@ -191,7 +228,7 @@ class CaptureService : Service() {
         )
 
         virtualDisplay = projection?.createVirtualDisplay(
-            "LiveAnalystCapture",
+            "WinWinLiveAnalyst",
             width,
             height,
             density,
@@ -201,87 +238,127 @@ class CaptureService : Service() {
             handler
         )
 
-        reader?.setOnImageAvailableListener({ source ->
+        reader?.setOnImageAvailableListener(
+            { imageReader ->
+                processNextImage(imageReader)
+            },
+            handler
+        )
+    }
 
-            if (processing ||
-                SystemClock.elapsedRealtime() - lastProcessedAt < 2500L
-            ) {
-                source.acquireLatestImage()?.close()
-                return@setOnImageAvailableListener
-            }
+    private fun processNextImage(source: ImageReader) {
+        if (stopped) return
 
-            lastProcessedAt = SystemClock.elapsedRealtime()
+        if (processing ||
+            SystemClock.elapsedRealtime() - lastProcessedAt <
+            CAPTURE_INTERVAL
+        ) {
+            source.acquireLatestImage()?.close()
+            return
+        }
 
-            val image = source.acquireLatestImage() ?: return@setOnImageAvailableListener
+        val image = source.acquireLatestImage() ?: return
 
-            try {
-                val plane = image.planes[0]
-                val buffer = plane.buffer
-                val pixelStride = plane.pixelStride
-                val rowStride = plane.rowStride
-                val rowPadding = rowStride - pixelStride * width
+        processing = true
+        lastProcessedAt = SystemClock.elapsedRealtime()
 
-                val bitmap = Bitmap.createBitmap(
-                    width + rowPadding / pixelStride,
-                    height,
-                    Bitmap.Config.ARGB_8888
-                )
+        var bitmap: Bitmap? = null
 
-                bitmap.copyPixelsFromBuffer(buffer)
+        try {
+            bitmap = imageToBitmap(image)
 
-                val cropped = Bitmap.createBitmap(
-                    bitmap,
-                    0,
-                    0,
-                    width,
-                    height
-                )
+            val input = InputImage.fromBitmap(bitmap, 0)
 
-                if (cropped !== bitmap) bitmap.recycle()
+            recognizer?.process(input)
+                ?.addOnSuccessListener { result ->
 
-                processing = true
+                    if (stopped) return@addOnSuccessListener
 
-                recognizer.process(InputImage.fromBitmap(cropped, 0))
-                    .addOnSuccessListener { result ->
-                        val snapshot = MarketParser.parse(result.text)
+                    // Koordinatları qoruyan yeni OCR parser
+                    val snapshot = MarketParser.parse(result)
 
-                        overlayText?.text =
-                            if (result.text.isBlank()) {
-                                "Oxuna bilən mətn aşkarlanmadı"
-                            } else {
-                                MarketAdvisor.render(snapshot)
-                            }
-                    }
-                    .addOnFailureListener {
-                        overlayText?.text =
-                            "Mətn tanınması alınmadı; yenidən yoxlanılır."
-                    }
-                    .addOnCompleteListener {
-                        processing = false
-                        cropped.recycle()
-                    }
+                    overlayText?.text =
+                        MarketAdvisor.render(snapshot)
+                }
+                ?.addOnFailureListener {
+                    showStatus(
+                        "Mətn tanınmadı. Ekran yenidən yoxlanılır."
+                    )
+                }
+                ?.addOnCompleteListener {
+                    bitmap?.recycle()
+                    bitmap = null
+                    processing = false
+                }
+                ?: run {
+                    bitmap?.recycle()
+                    bitmap = null
+                    processing = false
+                }
 
-            } catch (_: Exception) {
-                processing = false
-            } finally {
-                image.close()
-            }
+        } catch (e: Exception) {
+            bitmap?.recycle()
+            processing = false
+            showStatus("OCR xətası: ${e.message}")
+        } finally {
+            image.close()
+        }
+    }
 
-        }, handler)
+    private fun imageToBitmap(image: Image): Bitmap {
+        val plane = image.planes[0]
+
+        val buffer: ByteBuffer = plane.buffer
+        val pixelStride = plane.pixelStride
+        val rowStride = plane.rowStride
+
+        val width = image.width
+        val height = image.height
+
+        val rowPadding = rowStride - pixelStride * width
+
+        val paddedWidth =
+            width + rowPadding / pixelStride
+
+        val paddedBitmap = Bitmap.createBitmap(
+            paddedWidth,
+            height,
+            Bitmap.Config.ARGB_8888
+        )
+
+        buffer.rewind()
+        paddedBitmap.copyPixelsFromBuffer(buffer)
+
+        val finalBitmap = Bitmap.createBitmap(
+            paddedBitmap,
+            0,
+            0,
+            width,
+            height
+        )
+
+        if (finalBitmap !== paddedBitmap) {
+            paddedBitmap.recycle()
+        }
+
+        return finalBitmap
+    }
+
+    private fun showStatus(message: String) {
+        handler.post {
+            overlayText?.text = message
+        }
     }
 
     override fun onDestroy() {
-        try {
-            overlay?.let {
-                (getSystemService(WINDOW_SERVICE) as WindowManager)
-                    .removeView(it)
-            }
-        } catch (_: Exception) {
-        }
+        stopped = true
 
         reader?.setOnImageAvailableListener(null, null)
         reader?.close()
+        reader = null
+
         virtualDisplay?.release()
+        virtualDisplay = null
 
         projectionCallback?.let {
             try {
@@ -290,8 +367,28 @@ class CaptureService : Service() {
             }
         }
 
-        projection?.stop()
-        recognizer.close()
+        try {
+            projection?.stop()
+        } catch (_: Exception) {
+        }
+
+        projection = null
+
+        recognizer?.close()
+        recognizer = null
+
+        try {
+            overlay?.let {
+                (getSystemService(WINDOW_SERVICE) as WindowManager)
+                    .removeView(it)
+            }
+        } catch (_: Exception) {
+        }
+
+        overlay = null
+        overlayText = null
+
+        handler.removeCallbacksAndMessages(null)
 
         super.onDestroy()
     }
