@@ -25,7 +25,6 @@ import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -63,9 +62,15 @@ class CaptureService : Service() {
     private var lastProcessedAt = 0L
     private var stopped = false
     private var collapsed = false
+    private var showingReport = false
 
-    private var panelWidth = 300
+    private var panelWidth = 320
     private var panelHeight = 260
+
+    private var lastSnapshot: ScreenSnapshot? = null
+
+    private var dragLastX = 0f
+    private var dragLastY = 0f
 
     private var projectionCallback: MediaProjection.Callback? = null
 
@@ -206,7 +211,9 @@ class CaptureService : Service() {
         val collapseButton = makeButton("▼") {
             collapsed = !collapsed
             overlayScroll?.visibility =
-                if (collapsed) LinearLayout.GONE else LinearLayout.VISIBLE
+                if (collapsed) LinearLayout.GONE
+                else LinearLayout.VISIBLE
+
             it.text = if (collapsed) "▲" else "▼"
         }
 
@@ -223,29 +230,24 @@ class CaptureService : Service() {
         header.addView(collapseButton)
         header.addView(closeButton)
 
-        // Panel yalnız başlıqdan tutularaq sürüşdürülür.
+        // Paneli başlıqdan tutaraq sürüşdürmək.
         title.setOnTouchListener { _, event ->
             val params = overlayParams
 
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    title.setTag(R.id.content, event.rawX)
-                    title.setTag(R.id.contentDescription, event.rawY)
+                    dragLastX = event.rawX
+                    dragLastY = event.rawY
                     true
                 }
 
                 MotionEvent.ACTION_MOVE -> {
                     if (params != null) {
-                        val oldX = title.getTag(R.id.content) as? Float
-                            ?: event.rawX
-                        val oldY = title.getTag(R.id.contentDescription) as? Float
-                            ?: event.rawY
+                        params.x += (event.rawX - dragLastX).toInt()
+                        params.y += (event.rawY - dragLastY).toInt()
 
-                        params.x += (event.rawX - oldX).toInt()
-                        params.y += (event.rawY - oldY).toInt()
-
-                        title.setTag(R.id.content, event.rawX)
-                        title.setTag(R.id.contentDescription, event.rawY)
+                        dragLastX = event.rawX
+                        dragLastY = event.rawY
 
                         try {
                             wm.updateViewLayout(panel, params)
@@ -256,15 +258,42 @@ class CaptureService : Service() {
                 }
 
                 MotionEvent.ACTION_UP,
-                MotionEvent.ACTION_CANCEL -> {
-                    title.setTag(R.id.content, null)
-                    title.setTag(R.id.contentDescription, null)
-                    true
-                }
+                MotionEvent.ACTION_CANCEL -> true
 
                 else -> false
             }
         }
+
+        // Əməliyyat düymələri.
+        val actionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        val saveButton = makeButton("SAXLA") {
+            saveCurrentPage()
+        }
+
+        val reportButton = makeButton("HESABAT") {
+            showReport()
+        }
+
+        val clearButton = makeButton("TƏMİZLƏ") {
+            clearPages()
+        }
+
+        actionRow.addView(
+            saveButton,
+            LinearLayout.LayoutParams(0, dp(42), 1f)
+        )
+        actionRow.addView(
+            reportButton,
+            LinearLayout.LayoutParams(0, dp(42), 1f)
+        )
+        actionRow.addView(
+            clearButton,
+            LinearLayout.LayoutParams(0, dp(42), 1f)
+        )
 
         val body = TextView(this).apply {
             text = "Ekran məlumatları gözlənilir..."
@@ -281,6 +310,8 @@ class CaptureService : Service() {
         overlayScroll = scroll
 
         panel.addView(header)
+        panel.addView(actionRow)
+
         panel.addView(
             scroll,
             LinearLayout.LayoutParams(
@@ -314,14 +345,49 @@ class CaptureService : Service() {
     ): TextView {
         return TextView(this).apply {
             text = label
-            textSize = 17f
+            textSize = 12f
             gravity = Gravity.CENTER
             setTextColor(0xFFFFFFFF.toInt())
-            setPadding(dp(7), dp(7), dp(7), dp(7))
+            setPadding(dp(6), dp(7), dp(6), dp(7))
             setOnClickListener {
                 action(this)
             }
         }
+    }
+
+    private fun saveCurrentPage() {
+        val snapshot = lastSnapshot
+
+        if (snapshot == null) {
+            showStatus("Əvvəlcə mərc səhifəsinin oxunmasını gözlə.")
+            return
+        }
+
+        val saved = MarketSession.savePage(snapshot)
+        showingReport = false
+
+        showStatus(
+            "SƏHİFƏ ${saved.pageNumber} YADDA SAXLANILDI\n\n" +
+                "Toplanan səhifə sayı: ${MarketSession.getPageCount()}\n\n" +
+                "İndi növbəti mərc səhifəsinə keçə bilərsən."
+        )
+    }
+
+    private fun showReport() {
+        showingReport = true
+
+        overlayText?.text = MarketSession.createReport()
+            .ifBlank { "Hesabat yaradılmadı." }
+    }
+
+    private fun clearPages() {
+        MarketSession.clear()
+        showingReport = false
+
+        showStatus(
+            "Yadda saxlanılan səhifələr silindi.\n" +
+                "Yeni təhlilə başlaya bilərsən."
+        )
     }
 
     private fun updateOverlaySize() {
@@ -330,9 +396,10 @@ class CaptureService : Service() {
 
         params.width = dp(panelWidth)
 
-        overlayScroll?.layoutParams = overlayScroll?.layoutParams?.apply {
-            height = dp(panelHeight)
-        }
+        overlayScroll?.layoutParams =
+            overlayScroll?.layoutParams?.apply {
+                height = dp(panelHeight)
+            }
 
         try {
             windowManager?.updateViewLayout(panel, params)
@@ -409,15 +476,25 @@ class CaptureService : Service() {
                     if (stopped) return@addOnSuccessListener
 
                     val snapshot = MarketParser.parse(result)
-                    overlayText?.text = MarketAdvisor.render(snapshot)
+                    lastSnapshot = snapshot
+
+                    if (!showingReport) {
+                        overlayText?.text =
+                            MarketAdvisor.render(snapshot)
+                    }
                 }
                 .addOnFailureListener {
-                    showStatus("Mətn tanınmadı. Yenidən yoxlanılır.")
+                    if (!showingReport) {
+                        showStatus(
+                            "Mətn tanınmadı. Yenidən yoxlanılır."
+                        )
+                    }
                 }
                 .addOnCompleteListener {
                     if (!bitmap.isRecycled) {
                         bitmap.recycle()
                     }
+
                     capturedBitmap = null
                     processing = false
                 }
@@ -426,6 +503,7 @@ class CaptureService : Service() {
             capturedBitmap?.let {
                 if (!it.isRecycled) it.recycle()
             }
+
             processing = false
             showStatus("OCR xətası: ${e.message}")
         } finally {
